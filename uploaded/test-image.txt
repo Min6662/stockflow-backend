@@ -1,0 +1,2 @@
+This is a test file to ensure the uploaded directory is properly served.
+You can replace this with actual image files when testing.

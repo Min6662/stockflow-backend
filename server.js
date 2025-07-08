@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { pool, testConnection, initializeDatabase } = require('./database');
 require('dotenv').config();
 
@@ -11,6 +14,78 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// Serve static files (for images)
+app.use('/icon', express.static('icon'));
+app.use('/uploads', express.static('uploads'));
+app.use('/uploaded', express.static('uploaded'));
+
+// Ensure upload directories exist
+const ensureDirectoryExists = (dirPath) => {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+};
+
+// Create upload directories if they don't exist
+ensureDirectoryExists('./icon');
+ensureDirectoryExists('./uploads');
+ensureDirectoryExists('./uploaded');
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    // You can customize the destination based on file type or request
+    const uploadDir = './uploaded';
+    ensureDirectoryExists(uploadDir);
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename with timestamp
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const filename = `${uniqueSuffix}${ext}`;
+    cb(null, filename);
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Only allow image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'), false);
+    }
+  }
+});
+
+// File upload endpoint
+app.post('/api/upload', upload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const fileUrl = `/uploaded/${req.file.filename}`;
+    res.json({
+      success: true,
+      message: 'File uploaded successfully',
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      size: req.file.size,
+      url: fileUrl,
+      fullUrl: `${req.protocol}://${req.get('host')}${fileUrl}`
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
 
 // API Key middleware (optional)
 const verifyApiKey = (req, res, next) => {
