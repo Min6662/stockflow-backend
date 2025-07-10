@@ -372,6 +372,199 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// Sales endpoints
+
+// Get all sales
+app.get('/api/sales', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    let query = 'SELECT * FROM sales ORDER BY timestamp DESC';
+    let params = [];
+    
+    if (startDate && endDate) {
+      query = 'SELECT * FROM sales WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp DESC';
+      params = [startDate, endDate];
+    }
+    
+    const [rows] = await pool.execute(query, params);
+    
+    // Parse sale items from JSON
+    const salesWithItems = rows.map(sale => ({
+      ...sale,
+      items: JSON.parse(sale.items || '[]')
+    }));
+    
+    res.json(salesWithItems);
+  } catch (error) {
+    console.error('Error fetching sales:', error);
+    res.status(500).json({ error: 'Failed to fetch sales' });
+  }
+});
+
+// Create new sale
+app.post('/api/sales', async (req, res) => {
+  try {
+    const {
+      id,
+      timestamp,
+      items,
+      totalAmount,
+      paymentMethod,
+      customerName,
+      notes
+    } = req.body;
+
+    // Validate required fields
+    if (!id || !timestamp || !items || !totalAmount || !paymentMethod) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: id, timestamp, items, totalAmount, paymentMethod' 
+      });
+    }
+
+    const [result] = await pool.execute(
+      `INSERT INTO sales 
+       (id, timestamp, items, total_amount, payment_method, customer_name, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        timestamp,
+        JSON.stringify(items),
+        totalAmount,
+        paymentMethod,
+        customerName || null,
+        notes || null
+      ]
+    );
+
+    res.status(201).json({
+      message: 'Sale created successfully',
+      saleId: id
+    });
+  } catch (error) {
+    console.error('Error creating sale:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(409).json({ error: 'Sale with this ID already exists' });
+    } else {
+      res.status(500).json({ error: 'Failed to create sale' });
+    }
+  }
+});
+
+// Update product stock (subtract sold quantity)
+app.put('/api/products/:id/stock', async (req, res) => {
+  try {
+    const { quantity, operation } = req.body;
+    
+    if (!quantity || !operation) {
+      return res.status(400).json({ error: 'Missing required fields: quantity, operation' });
+    }
+
+    // Get current product
+    const [rows] = await pool.execute(
+      'SELECT quantity FROM products WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const currentQuantity = rows[0].quantity;
+    let newQuantity;
+
+    if (operation === 'subtract') {
+      newQuantity = Math.max(0, currentQuantity - quantity);
+    } else if (operation === 'add') {
+      newQuantity = currentQuantity + quantity;
+    } else {
+      return res.status(400).json({ error: 'Invalid operation. Use "add" or "subtract"' });
+    }
+
+    // Update the product quantity
+    const [result] = await pool.execute(
+      'UPDATE products SET quantity = ? WHERE id = ?',
+      [newQuantity, req.params.id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.json({ 
+      message: 'Product stock updated successfully',
+      productId: req.params.id,
+      oldQuantity: currentQuantity,
+      newQuantity: newQuantity
+    });
+  } catch (error) {
+    console.error('Error updating product stock:', error);
+    res.status(500).json({ error: 'Failed to update product stock' });
+  }
+});
+
+// Get sales summary/analytics
+app.get('/api/sales/summary', async (req, res) => {
+  try {
+    const today = new Date();
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+
+    // Get total sales
+    const [totalSalesResult] = await pool.execute(
+      'SELECT COUNT(*) as count, SUM(total_amount) as revenue FROM sales'
+    );
+
+    // Get today's sales
+    const [todaySalesResult] = await pool.execute(
+      'SELECT COUNT(*) as count, SUM(total_amount) as revenue FROM sales WHERE timestamp >= ? AND timestamp < ?',
+      [todayStart.toISOString(), todayEnd.toISOString()]
+    );
+
+    // Get average sale amount
+    const [avgSaleResult] = await pool.execute(
+      'SELECT AVG(total_amount) as avgAmount FROM sales'
+    );
+
+    const summary = {
+      totalSales: totalSalesResult[0].count || 0,
+      totalRevenue: totalSalesResult[0].revenue || 0,
+      todaySales: todaySalesResult[0].count || 0,
+      todayRevenue: todaySalesResult[0].revenue || 0,
+      averageSaleAmount: avgSaleResult[0].avgAmount || 0
+    };
+
+    res.json(summary);
+  } catch (error) {
+    console.error('Error fetching sales summary:', error);
+    res.status(500).json({ error: 'Failed to fetch sales summary' });
+  }
+});
+
+// Get sale by ID
+app.get('/api/sales/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM sales WHERE id = ?',
+      [req.params.id]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Sale not found' });
+    }
+    
+    const sale = {
+      ...rows[0],
+      items: JSON.parse(rows[0].items || '[]')
+    };
+    
+    res.json(sale);
+  } catch (error) {
+    console.error('Error fetching sale:', error);
+    res.status(500).json({ error: 'Failed to fetch sale' });
+  }
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });

@@ -54,6 +54,41 @@ async function initializeDatabase() {
     } else {
       console.log('❌ Products table not found in database!');
     }
+
+    // Check for sales table and create if it doesn't exist
+    const [salesTables] = await connection.execute("SHOW TABLES LIKE 'sales'");
+    
+    if (salesTables.length === 0) {
+      console.log('🔨 Creating sales table...');
+      
+      await connection.execute(`
+        CREATE TABLE sales (
+          id VARCHAR(255) PRIMARY KEY,
+          timestamp DATETIME NOT NULL,
+          items JSON NOT NULL,
+          total_amount DECIMAL(10, 2) NOT NULL,
+          payment_method VARCHAR(50) NOT NULL,
+          customer_name VARCHAR(255) NULL,
+          notes TEXT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      
+      console.log('✅ Sales table created successfully!');
+    } else {
+      console.log('✅ Sales table found in database!');
+      
+      // Check sales table structure
+      const [salesColumns] = await connection.execute('DESCRIBE sales');
+      console.log('📋 Sales table columns:');
+      salesColumns.forEach(col => {
+        console.log(`   - ${col.Field} (${col.Type})`);
+      });
+      
+      // Check sales record count
+      const [salesCount] = await connection.execute('SELECT COUNT(*) as total FROM sales');
+      console.log(`📊 Existing sales records: ${salesCount[0].total}`);
+    }
     
     connection.release();
   } catch (error) {
