@@ -4,6 +4,7 @@ const bodyParser = require('body-parser');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const jwt = require('jsonwebtoken');
 const { pool, testConnection, initializeDatabase } = require('./database');
 require('dotenv').config();
 
@@ -22,8 +23,13 @@ app.use('/uploaded', express.static('uploaded'));
 
 // Ensure upload directories exist
 const ensureDirectoryExists = (dirPath) => {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
+  try {
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+      console.log(`✅ Created directory: ${dirPath}`);
+    }
+  } catch (error) {
+    console.error(`❌ Failed to create directory ${dirPath}:`, error.message);
   }
 };
 
@@ -35,8 +41,8 @@ ensureDirectoryExists('./uploaded');
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    // You can customize the destination based on file type or request
-    const uploadDir = './uploaded';
+    // Use uploads directory for all uploads
+    const uploadDir = './uploads';
     ensureDirectoryExists(uploadDir);
     cb(null, uploadDir);
   },
@@ -64,6 +70,27 @@ const upload = multer({
   }
 });
 
+// JWT configuration
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-here';
+
+// Middleware to verify JWT token
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+};
+
 // File upload endpoint
 app.post('/api/upload', upload.single('image'), (req, res) => {
   try {
@@ -71,7 +98,7 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const fileUrl = `/uploaded/${req.file.filename}`;
+    const fileUrl = `/uploads/${req.file.filename}`;
     res.json({
       success: true,
       message: 'File uploaded successfully',
@@ -114,9 +141,11 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Get all products
-app.get('/api/products', async (req, res) => {
+// Get all products (user-specific)
+app.get('/api/products', verifyToken, async (req, res) => {
   try {
+    const userId = req.user.id;
+    
     // First, let's check if the table exists and get its structure
     const [tables] = await pool.execute("SHOW TABLES LIKE 'products'");
     
@@ -129,16 +158,31 @@ app.get('/api/products', async (req, res) => {
     const [columns] = await pool.execute("DESCRIBE products");
     console.log('Table structure:', columns);
 
-    // Check if created_at column exists
+    // Check if created_at and user_id columns exist
     const hasCreatedAt = columns.some(col => col.Field === 'created_at');
+    const hasUserId = columns.some(col => col.Field === 'user_id');
     
     const orderBy = hasCreatedAt ? 'ORDER BY created_at DESC' : 'ORDER BY id DESC';
     
-    const [rows] = await pool.execute(`SELECT * FROM products ${orderBy}`);
+    let query;
+    let params;
+    
+    if (hasUserId) {
+      // Filter by user ID if user_id column exists
+      query = `SELECT * FROM products WHERE user_id = ? ${orderBy}`;
+      params = [userId];
+    } else {
+      // If no user_id column, return all products (backward compatibility)
+      query = `SELECT * FROM products ${orderBy}`;
+      params = [];
+    }
+    
+    const [rows] = await pool.execute(query, params);
     
     // Transform products for Flutter compatibility
     const transformedProducts = rows.map(transformProductForFlutter);
     
+    console.log(`Retrieved ${transformedProducts.length} products for user ${userId}`);
     res.json(transformedProducts);
   } catch (error) {
     console.error('Error fetching products:', error);
@@ -146,13 +190,29 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-// Get single product by ID
-app.get('/api/products/:id', async (req, res) => {
+// Get single product by ID (user-specific)
+app.get('/api/products/:id', verifyToken, async (req, res) => {
   try {
-    const [rows] = await pool.execute(
-      'SELECT * FROM products WHERE id = ?',
-      [req.params.id]
-    );
+    const userId = req.user.id;
+    
+    // Check if user_id column exists
+    const [columns] = await pool.execute("DESCRIBE products");
+    const hasUserId = columns.some(col => col.Field === 'user_id');
+    
+    let query;
+    let params;
+    
+    if (hasUserId) {
+      // Filter by both product ID and user ID if user_id column exists
+      query = 'SELECT * FROM products WHERE id = ? AND user_id = ?';
+      params = [req.params.id, userId];
+    } else {
+      // If no user_id column, use product ID only (backward compatibility)
+      query = 'SELECT * FROM products WHERE id = ?';
+      params = [req.params.id];
+    }
+    
+    const [rows] = await pool.execute(query, params);
     
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
@@ -165,9 +225,10 @@ app.get('/api/products/:id', async (req, res) => {
   }
 });
 
-// Create new product
-app.post('/api/products', async (req, res) => {
+// Create new product (user-specific)
+app.post('/api/products', verifyToken, async (req, res) => {
   try {
+    const userId = req.user.id;
     const {
       id,
       name,
@@ -186,11 +247,35 @@ app.post('/api/products', async (req, res) => {
       });
     }
 
-    const [result] = await pool.execute(
-      `INSERT INTO products 
-       (id, name, price, price_in, quantity, image_path, price_out, image_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
+    // Check if user_id column exists
+    const [columns] = await pool.execute("DESCRIBE products");
+    const hasUserId = columns.some(col => col.Field === 'user_id');
+    
+    let query;
+    let params;
+    
+    if (hasUserId) {
+      // Include user_id if column exists
+      query = `INSERT INTO products 
+               (id, name, price, price_in, quantity, image_path, price_out, image_url, user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      params = [
+        id, 
+        name, 
+        price || 0, 
+        price_in || '0', 
+        quantity || 0, 
+        image_path || '', 
+        price || 0, // Use price for price_out as well
+        image_url || '',
+        userId
+      ];
+    } else {
+      // Original query without user_id (backward compatibility)
+      query = `INSERT INTO products 
+               (id, name, price, price_in, quantity, image_path, price_out, image_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+      params = [
         id, 
         name, 
         price || 0, 
@@ -199,8 +284,10 @@ app.post('/api/products', async (req, res) => {
         image_path || '', 
         price || 0, // Use price for price_out as well
         image_url || ''
-      ]
-    );
+      ];
+    }
+
+    const [result] = await pool.execute(query, params);
 
     // Fetch the created product
     const [rows] = await pool.execute(
@@ -208,6 +295,7 @@ app.post('/api/products', async (req, res) => {
       [id]
     );
 
+    console.log(`Product ${id} created successfully for user ${userId}`);
     res.status(201).json({
       message: 'Product created successfully',
       product: transformProductForFlutter(rows[0])
@@ -222,9 +310,10 @@ app.post('/api/products', async (req, res) => {
   }
 });
 
-// Update product
-app.put('/api/products/:id', async (req, res) => {
+// Update product (user-specific)
+app.put('/api/products/:id', verifyToken, async (req, res) => {
   try {
+    const userId = req.user.id;
     const {
       name,
       price,
@@ -235,16 +324,33 @@ app.put('/api/products/:id', async (req, res) => {
       image_url
     } = req.body;
 
-    const [result] = await pool.execute(
-      `UPDATE products 
-       SET name = ?, price = ?, price_in = ?, quantity = ?, 
-           image_path = ?, price_out = ?, image_url = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [name, price || 0, price_in || '0', quantity || 0, image_path || '', price_out || 0, image_url || '', req.params.id]
-    );
+    // Check if user_id column exists
+    const [columns] = await pool.execute("DESCRIBE products");
+    const hasUserId = columns.some(col => col.Field === 'user_id');
+    
+    let query;
+    let params;
+    
+    if (hasUserId) {
+      // Include user_id check if column exists
+      query = `UPDATE products 
+               SET name = ?, price = ?, price_in = ?, quantity = ?, 
+                   image_path = ?, price_out = ?, image_url = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND user_id = ?`;
+      params = [name, price || 0, price_in || '0', quantity || 0, image_path || '', price_out || 0, image_url || '', req.params.id, userId];
+    } else {
+      // Original query without user_id check (backward compatibility)
+      query = `UPDATE products 
+               SET name = ?, price = ?, price_in = ?, quantity = ?, 
+                   image_path = ?, price_out = ?, image_url = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`;
+      params = [name, price || 0, price_in || '0', quantity || 0, image_path || '', price_out || 0, image_url || '', req.params.id];
+    }
+
+    const [result] = await pool.execute(query, params);
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ error: 'Product not found or access denied' });
     }
 
     // Fetch the updated product
@@ -252,6 +358,8 @@ app.put('/api/products/:id', async (req, res) => {
       'SELECT * FROM products WHERE id = ?',
       [req.params.id]
     );
+
+    console.log(`Product ${req.params.id} updated successfully for user ${userId}`);
 
     res.json({
       message: 'Product updated successfully',
@@ -565,6 +673,107 @@ app.get('/api/sales/:id', async (req, res) => {
   }
 });
 
+// Authentication endpoints
+const bcrypt = require('bcryptjs');
+
+// User registration endpoint
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, name, role = 'user' } = req.body;
+  
+  if (!email || !password || !name) {
+    return res.status(400).json({ error: 'Email, password, and name are required' });
+  }
+
+  try {
+    // Check if user already exists
+    const [existingUsers] = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+    if (existingUsers.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insert user
+    const [result] = await pool.query(
+      'INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)',
+      [email, hashedPassword, name, role]
+    );
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: result.insertId, email, role },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      token,
+      user: {
+        id: result.insertId,
+        email,
+        name,
+        role,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// User login endpoint
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  try {
+    // Find user
+    const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    if (users.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = users[0];
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        createdAt: user.created_at,
+        updatedAt: user.updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
@@ -579,11 +788,13 @@ async function startServer() {
     // Initialize database tables
     await initializeDatabase();
     
-    // Start the server
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📱 API endpoints available at http://localhost:${PORT}/api`);
-      console.log(`🏥 Health check: http://localhost:${PORT}/api/health`);
+    // Start the server on all interfaces so it's accessible from other devices
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
+      console.log(`📱 Local access: http://localhost:${PORT}`);
+      console.log(`🌐 Network access: http://192.168.100.142:${PORT}`);
+      console.log(`📱 API endpoints available at http://192.168.100.142:${PORT}/api`);
+      console.log(`🏥 Health check: http://192.168.100.142:${PORT}/api/health`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

@@ -70,7 +70,8 @@ async function initializeDatabase() {
           payment_method VARCHAR(50) NOT NULL,
           customer_name VARCHAR(255) NULL,
           notes TEXT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          user_id INT NULL
         )
       `);
       
@@ -88,6 +89,40 @@ async function initializeDatabase() {
       // Check sales record count
       const [salesCount] = await connection.execute('SELECT COUNT(*) as total FROM sales');
       console.log(`📊 Existing sales records: ${salesCount[0].total}`);
+    }
+
+    // Check for users table and create if it doesn't exist
+    const [usersTables] = await connection.execute("SHOW TABLES LIKE 'users'");
+    
+    if (usersTables.length === 0) {
+      console.log('🔨 Creating users table...');
+      
+      await connection.execute(`
+        CREATE TABLE users (
+          id INT PRIMARY KEY AUTO_INCREMENT,
+          email VARCHAR(255) UNIQUE NOT NULL,
+          password_hash VARCHAR(255) NOT NULL,
+          name VARCHAR(255) NOT NULL,
+          role VARCHAR(50) DEFAULT 'user',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+      `);
+      
+      console.log('✅ Users table created successfully!');
+    } else {
+      console.log('✅ Users table found in database!');
+      
+      // Check users table structure
+      const [usersColumns] = await connection.execute('DESCRIBE users');
+      console.log('📋 Users table columns:');
+      usersColumns.forEach(col => {
+        console.log(`   - ${col.Field} (${col.Type})`);
+      });
+      
+      // Check users record count
+      const [usersCount] = await connection.execute('SELECT COUNT(*) as total FROM users');
+      console.log(`📊 Existing users: ${usersCount[0].total}`);
     }
     
     connection.release();
